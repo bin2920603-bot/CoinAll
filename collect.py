@@ -58,7 +58,7 @@ def resolve():
             missing.append(n)
     if missing:
         print("[확인필요] 업비트 원화마켓에 없음: " + ", ".join(missing))
-    return out
+    return [{"market": k, "name": v} for k, v in by_code.items()]
 
 
 def slot_now():
