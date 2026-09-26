@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""1~3분 주기로 거래대금을 조회해 단기 급등(직전 체크 대비 %증가)을 감지한다."""
+"""15분 거래대금 기록과 별도로, 짧은 주기(5분)로 가격만 체크해서
+직전 체크 대비 급등한 코인을 감지·기록한다.
+
+index.html이 기대하는 형식으로 저장한다:
+  {"surges": {"KRW-BTC": {"level": 1, "pct": 12.3}, ...}, "updated_at": "..."}
+
+level: 1 = 10~20% 상승, 2 = 20~50%, 3 = 50%~
+"""
 import json, os, time
 from datetime import datetime, timedelta, timezone
 import requests
 
 KST = timezone(timedelta(hours=9))
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SURGE = os.path.join(ROOT, "data", "surge.json")
-KEEP_MIN = 30  # 이력은 최근 30분치만 보관 (파일 용량 관리용)
+SURGE = os.path.join(ROOT, "data", "surge.json")       # index.html이 읽는 파일
+LAST = os.path.join(ROOT, "data", "surge_last.json")   # 직전 체크 시점 가격 스냅샷
+ACTIVE_MIN = 20   # 급등 표시(배지)를 몇 분간 화면에 유지할지
 
-def get(url, params=None, tries=4):
+
+def get(url, params=None, tries=3):
     for i in range(tries):
         r = requests.get(url, params=params, timeout=10)
         if r.status_code == 429:
@@ -19,52 +28,69 @@ def get(url, params=None, tries=4):
         return r.json()
     r.raise_for_status()
 
+
 def level(pct):
-    if pct >= 50: return 3
-    if pct >= 20: return 2
-    if pct >= 10: return 1
+    if pct >= 50:
+        return 3
+    if pct >= 20:
+        return 2
+    if pct >= 10:
+        return 1
     return 0
 
-def main():
-    markets_info = get("https://api.upbit.com/v1/market/all", {"isDetails": "false"})
-    codes = [m["market"] for m in markets_info if m["market"].startswith("KRW-")]
 
-    store = json.load(open(SURGE, encoding="utf-8")) if os.path.exists(SURGE) else {"coins": {}}
-    now = datetime.now(KST)
-    now_s = now.isoformat(timespec="seconds")
+def check():
+    markets = get("https://api.upbit.com/v1/market/all", {"isDetails": "false"})
+    codes = [m["market"] for m in markets if m["market"].startswith("KRW-")]
 
-    tickers = {}
+    prices = {}
     for i in range(0, len(codes), 100):
         chunk = codes[i:i + 100]
         try:
             for t in get("https://api.upbit.com/v1/ticker", {"markets": ",".join(chunk)}):
-                tickers[t["market"]] = t
+                prices[t["market"]] = t["trade_price"]
         except Exception as e:
             print(f" ! 조회 실패: {e}")
-        time.sleep(0.2)
+        time.sleep(0.15)
 
-    surges = {}
-    for code, t in tickers.items():
-        cur = t["acc_trade_price_24h"]
-        c = store["coins"].setdefault(code, {"hist": []})
-        hist = c["hist"]
-        prev = hist[-1]["v"] if hist else None
-        pct = None
-        if prev and prev > 0:
-            pct = round((cur - prev) / prev * 100, 1)
-        hist.append({"t": now_s, "v": cur})
-        cut = now - timedelta(minutes=KEEP_MIN)
-        c["hist"] = [h for h in hist if datetime.fromisoformat(h["t"]) >= cut]
-        if pct is not None:
-            lvl = level(pct)
-            if lvl > 0:
-                surges[code] = {"pct": pct, "level": lvl, "t": now_s}
+    last = json.load(open(LAST, encoding="utf-8")) if os.path.exists(LAST) else {}
 
-    store["updated_at"] = now_s
-    store["surges"] = surges
+    prev = {"active": {}}
+    if os.path.exists(SURGE):
+        try:
+            prev = json.load(open(SURGE, encoding="utf-8"))
+        except Exception:
+            pass
+    prev_active = prev.get("active", {})
+
+    now = datetime.now(KST)
+    now_s = now.isoformat(timespec="seconds")
+    cut = (now - timedelta(minutes=ACTIVE_MIN)).isoformat(timespec="seconds")
+
+    # 아직 유효 시간이 지나지 않은 기존 급등은 유지
+    active = {k: v for k, v in prev_active.items() if v.get("time", "") >= cut}
+
+    new_count = 0
+    for code, price in prices.items():
+        prevp = last.get(code)
+        if prevp:
+            pct = (price - prevp) / prevp * 100
+            lv = level(pct)
+            if lv:
+                active[code] = {"level": lv, "pct": round(pct, 1), "time": now_s}
+                new_count += 1
+
+    surges = {k: {"level": v["level"], "pct": v["pct"]} for k, v in active.items()}
+
     os.makedirs(os.path.dirname(SURGE), exist_ok=True)
-    json.dump(store, open(SURGE, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
-    print(f"급등 감지 {len(surges)}건 (전체 {len(tickers)}종목 점검)")
+    json.dump(
+        {"surges": surges, "active": active, "updated_at": now_s},
+        open(SURGE, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":")
+    )
+    json.dump(prices, open(LAST, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+
+    print(f"{now_s} 급등체크 · {len(prices)}종목 조회 · 신규 {new_count}건 · 표시중 {len(surges)}건")
+
 
 if __name__ == "__main__":
-    main()
+    check()
