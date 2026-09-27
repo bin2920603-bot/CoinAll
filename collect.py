@@ -91,16 +91,19 @@ def collect_volumes(coins):
             if code not in failed:
                 failed.append(code)
             continue
-        entry = store["coins"].setdefault(code, {"name": meta["name"], "slots": {}})
+        entry = store["coins"].setdefault(code, {"name": meta["name"], "slots": {}, "prices": {}})
+        entry.setdefault("prices", {})
         entry["name"] = meta["name"]
         entry["price"] = t["trade_price"]
         entry["change"] = round(t.get("signed_change_rate", 0) * 100, 2)
         # 업비트 화면의 '거래대금' = 24시간 누적 거래대금
         entry["slots"][slot] = round(t["acc_trade_price_24h"])
+        entry["prices"][slot] = t["trade_price"]           # 그 시각의 가격도 같이 저장
 
     cut = (datetime.now(KST) - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%dT%H:%M")
     for e in store["coins"].values():
         e["slots"] = {k: v for k, v in e["slots"].items() if k >= cut}
+        e["prices"] = {k: v for k, v in e.get("prices", {}).items() if k >= cut}
 
     store["updated_at"] = datetime.now(KST).isoformat(timespec="seconds")
     store["failed"] = failed
